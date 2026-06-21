@@ -282,28 +282,52 @@ task.spawn(function()
     -- wait for BigFroot itself to finish loading
     while not bfRuntime() do task.wait(2) end
     print("[BF] auto-enabling pet-server finder + auto-refresh…")
+    local function panelNow()
+        local rg = CG:FindFirstChild("RobloxGui")
+        return rg and rg:FindFirstChild("BigFrootServerBrowser") or nil
+    end
+    local function autoRefreshBtn(panel)
+        if not panel then return nil end
+        for _, d in ipairs(panel:GetDescendants()) do
+            if d:IsA("TextButton") and string.find(d.Text, "Auto-refresh:", 1, true) then return d end
+        end
+        return nil
+    end
     while true do
+        local fresh = false   -- becomes true only once BigFroot's OWN auto-refresh is CONFIRMED ON
         pcall(function()
             local rt = bfRuntime()
             if not rt then return end
-            -- 1) ensure the finder PANEL is open (it's destroyed when closed; openServerBrowser is idempotent)
-            local panel = CG:FindFirstChild("RobloxGui") and CG.RobloxGui:FindFirstChild("BigFrootServerBrowser")
+            -- 1) ensure the finder panel is open (destroyed when closed; openServerBrowser is idempotent)
+            local panel = panelNow()
             if not panel then
                 pcall(rt.openServerBrowser)
                 task.wait(1.5)   -- let it build + the async server-list fetch resolve
-                panel = CG:FindFirstChild("RobloxGui") and CG.RobloxGui:FindFirstChild("BigFrootServerBrowser")
+                panel = panelNow()
             end
-            -- 2) ensure AUTO-REFRESH is ON (continuous rescans, ~2s cadence)
-            if panel then
-                for _, d in ipairs(panel:GetDescendants()) do
-                    if d:IsA("TextButton") and string.find(d.Text, "Auto-refresh:", 1, true) then
-                        if not string.find(d.Text, "ON", 1, true) then clickButton(d) end
-                        break
-                    end
-                end
+            -- 2) try to switch AUTO-REFRESH on, then VERIFY it actually flipped (catches a no-op/stub firesignal)
+            local btn = autoRefreshBtn(panel)
+            if btn and not string.find(btn.Text, "ON", 1, true) then
+                clickButton(btn)
+                task.wait(0.3)
+                btn = autoRefreshBtn(panelNow())
             end
+            if btn and string.find(btn.Text, "ON", 1, true) then fresh = true end
         end)
-        task.wait(10)   -- watchdog: re-open / re-enable if the panel was closed or reset
+        if fresh then
+            task.wait(8)    -- auto-refresh is ON → BigFroot self-refreshes (~2s); just maintain
+        else
+            -- FALLBACK (e.g. executor has no working firesignal): force a fresh fetch ourselves by
+            -- destroy+reopen — this re-fetches the full list every time and needs NO firesignal.
+            pcall(function()
+                local rt = bfRuntime()
+                if not rt then return end
+                local p = panelNow()
+                if p then pcall(function() p:Destroy() end) end
+                pcall(rt.openServerBrowser)
+            end)
+            task.wait(4)    -- our manual refresh cadence (only used when auto-refresh won't turn on)
+        end
     end
 end)
 
