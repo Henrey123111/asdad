@@ -503,12 +503,28 @@ task.spawn(function()
                 end
             end
             if #servers > 0 then
-                pcall(_req, {
+                -- try the efficient bulk endpoint first
+                local ok, res = pcall(_req, {
                     Url = SNIPE_BASE.."/report_bulk", Method="POST",
                     Headers = { ["Content-Type"]="application/json", ["X-PH-Key"]=SNIPE_BOT_KEY },
                     Body = HS:JSONEncode({ bot="bigfroot-feeder", servers=servers }),
                 })
-                print("[BF] fed "..#servers.." servers -> coordinator")
+                local code = ok and res and (res.StatusCode or res.status_code) or 0
+                if code >= 200 and code < 300 then
+                    print("[BF] fed "..#servers.." servers (bulk) -> coordinator")
+                else
+                    -- FALLBACK: coordinator doesn't have /report_bulk deployed yet (404/err) → use the
+                    -- per-server /report endpoint that already exists, so the feed works WITHOUT deploying.
+                    for _, s in ipairs(servers) do
+                        pcall(_req, {
+                            Url = SNIPE_BASE.."/report", Method="POST",
+                            Headers = { ["Content-Type"]="application/json", ["X-PH-Key"]=SNIPE_BOT_KEY },
+                            Body = HS:JSONEncode({ bot="bigfroot", job=s.job, place=s.place, players=s.players, bfAge=s.bfAge, pets=s.pets }),
+                        })
+                        task.wait(0.05)
+                    end
+                    print("[BF] /report_bulk unavailable ("..tostring(code)..") -> fed "..#servers.." via per-server /report")
+                end
             end
         end)
         task.wait(SCAN_GAP)
