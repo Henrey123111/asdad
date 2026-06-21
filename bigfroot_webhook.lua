@@ -263,9 +263,19 @@ task.spawn(function()
     local CG = game:GetService("CoreGui")
     local function bfRuntime()
         local g = getgenv and getgenv() or _G
-        local bf = g and g.BigFrootGrowAGarden2
+        if not g then return nil end
+        -- exact known global first (fast path)
+        local bf = g.BigFrootGrowAGarden2
         if bf and type(bf.Runtime) == "table" and type(bf.Runtime.openServerBrowser) == "function" then
             return bf.Runtime
+        end
+        -- fallback: ANY BigFroot* global exposing Runtime.openServerBrowser (survives version/name changes,
+        -- and handles BigFroot loading AFTER this script — we just keep polling until it appears)
+        for k, v in pairs(g) do
+            if type(k) == "string" and k:find("BigFroot") and type(v) == "table"
+                and type(v.Runtime) == "table" and type(v.Runtime.openServerBrowser) == "function" then
+                return v.Runtime
+            end
         end
         return nil
     end
