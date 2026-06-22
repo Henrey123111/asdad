@@ -37,6 +37,8 @@ local sentFinds    = {}   -- jobId..name -> os.clock()
 local serverSeenAt = {}   -- jobId -> os.clock() when FIRST discovered (used to detect re-posts of old servers)
 local _feedDown      = false   -- coordinator-feed health → drives a throttled Discord alert (Discord is the one channel we can see)
 local _lastFeedAlert = 0
+local _lastScanLog   = 0       -- throttle for the "nothing to feed" scan diagnostic posted to Discord
+local _fedOnce       = false   -- post a one-time Discord ✅ the first time a feed succeeds
 
 -- ── post webhook with 429 retry ───────────────────────────────────────────────
 local function post(payload)
@@ -424,31 +426,68 @@ task.spawn(function()
     print("[BF] bulk feeder started -> "..SNIPE_BASE.."/report_bulk")
     pcall(post, { content = "🛰️ **BigFroot feeder ONLINE** → feeding `"..SNIPE_BASE.."`. (If this device ever can't reach the coordinator you'll get a ⚠️ right here.)" })
     while true do
-        pcall(function()
+        local _scanOk, _scanErr = pcall(function()
             if not _req then return end
             local sf = findBFScrollingFrame()
-            if not sf then return end
+            if not sf then
+                if os.clock() - _lastScanLog > 30 then
+                    _lastScanLog = os.clock()
+                    pcall(post, { content = "🔎 feeder: BigFroot finder panel NOT found — open it and keep it open so the feeder can read the server list." })
+                end
+                return
+            end
             local servers, n = {}, 0
+            local rows, withBtn, parsed, viaFallback = 0, 0, 0, 0   -- DIAGNOSTIC counters
             for _, row in ipairs(sf:GetChildren()) do
                 if row:IsA("Frame") then
+                    rows += 1
                     local btn = row:FindFirstChildWhichIsA("TextButton")
+                    if btn then withBtn += 1 end
+                    -- Preferred: rich structured entry (every pet). FALLBACK to the SAME method the
+                    -- (working) Discord loop uses — getJobId + the row's label text — whenever getEntry's
+                    -- strict upvalue shape isn't present. THAT mismatch is why Discord posted but the feed didn't.
+                    local job, pets, age, players
                     local d = btn and getEntry(btn)
-                    if d and type(d.jobId)=="string" and type(d.pets)=="table" then
-                        local pets = {}
+                    if d and type(d.jobId) == "string" and type(d.pets) == "table" then
+                        job, age, players = d.jobId, tonumber(d.age) or 0, tonumber(d.players) or 0
+                        pets = {}
                         for _, p in ipairs(d.pets) do
                             local nm = tostring(p.n or "")
-                            if nm ~= "" then pets[#pets+1] = { name=nm, rarity=tostring(p.r or "") } end
+                            if nm ~= "" then pets[#pets+1] = { name = nm, rarity = tostring(p.r or "") } end
                         end
-                        if #pets > 0 then
-                            servers[#servers+1] = {
-                                job=d.jobId, place=tonumber(d.placeId) or PLACE_ID,
-                                pets=pets, bfAge=tonumber(d.age) or 0, players=tonumber(d.players) or 0,
-                            }
-                            n += 1
-                            if n % 20 == 0 then task.wait() end   -- spread getupvalues across frames
+                    elseif btn then
+                        job = getJobId(btn)
+                        local petTxt, plyTxt = "", ""
+                        for _, v in ipairs(row:GetChildren()) do
+                            if v:IsA("TextLabel") then
+                                if v.Text:find("players") then plyTxt = v.Text
+                                elseif v.Text ~= ""       then petTxt = v.Text end
+                            end
+                        end
+                        if job and petTxt ~= "" then
+                            local rar  = petTxt:match("%((.-)%)") or ""
+                            local name = (petTxt:gsub("%s*%(.-%)", "")):gsub("^%s+", ""):gsub("%s+$", "")
+                            pets    = { { name = (name ~= "" and name or petTxt), rarity = rar } }
+                            age     = parseAge(plyTxt) or 0
+                            players = tonumber(plyTxt:match("%d+")) or 0
+                            viaFallback += 1
                         end
                     end
+                    if job and pets and #pets > 0 then
+                        parsed += 1
+                        servers[#servers+1] = { job = job, place = PLACE_ID, pets = pets, bfAge = age or 0, players = players or 0 }
+                        n += 1
+                        if n % 20 == 0 then task.wait() end   -- spread upvalue reads across frames
+                    end
                 end
+            end
+            -- DIAGNOSTIC: if we fed nothing, post WHY to Discord (throttled) so the empty Live Wild Pets is explained
+            if #servers == 0 and (os.clock() - _lastScanLog > 30) then
+                _lastScanLog = os.clock()
+                local why = (rows == 0) and "the finder panel has 0 rows (open it / let it refresh)"
+                    or (withBtn == 0) and ("found "..rows.." rows but none had a join button")
+                    or ("found "..rows.." rows but couldn't read a job+pet from any (getEntry AND label/jobId fallback both empty)")
+                pcall(post, { content = "🔎 feeder: **nothing to send to coordinator** — "..why..". [rows="..rows..", btn="..withBtn..", parsed="..parsed.."]" })
             end
             if #servers > 0 then
                 -- try the efficient bulk endpoint first
@@ -479,7 +518,8 @@ task.spawn(function()
                     detail = "per-server "..sent.."/"..#servers.." (bulk="..tostring(code)..")"
                 end
                 if fedOK then
-                    print("[BF] fed "..#servers.." servers ("..detail..") -> coordinator")
+                    print("[BF] fed "..#servers.." servers ("..detail..", fallback="..viaFallback..") -> coordinator")
+                    if not _fedOnce then _fedOnce = true; pcall(post, { content = "✅ feeder: now sending **"..#servers.." servers** to the coordinator (`"..detail.."`). Live Wild Pets should fill within a few seconds." }) end
                     if _feedDown then pcall(post, { content = "✅ feeder: coordinator feed **restored**." }); _feedDown = false end
                 else
                     warn("[BF] coordinator feed FAILED ("..detail..") — is "..SNIPE_BASE.." reachable from THIS device?")
@@ -490,6 +530,10 @@ task.spawn(function()
                 end
             end
         end)
+        if not _scanOk and (os.clock() - _lastScanLog > 30) then
+            _lastScanLog = os.clock()
+            pcall(post, { content = "⚠️ feeder scan ERROR: "..tostring(_scanErr).." — this is why nothing reaches the coordinator." })
+        end
         task.wait(SCAN_GAP)
     end
 end)
