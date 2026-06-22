@@ -150,8 +150,9 @@ local function getJobId(btn)
         local ups = tryGetUpvalues(fn)
         for _, uv in ipairs(ups) do
             if type(uv)=="table" then
-                if type(uv.jobId)=="string" and #uv.jobId==36 then return uv.jobId end
-                for _, v in pairs(uv) do
+                local e = (type(uv.Server)=="table" and uv.Server) or uv   -- unwrap current BigFroot's .Server nesting
+                if type(e.jobId)=="string" and #e.jobId==36 then return e.jobId end
+                for _, v in pairs(e) do
                     if type(v)=="string" and #v==36 and v:find("%-") then return v end
                 end
             elseif type(uv)=="string" and #uv==36 and uv:find("%-") then
@@ -177,8 +178,14 @@ local function getEntry(btn)
         if type(fn) == "function" then
             local ups = tryGetUpvalues(fn)
             for _, uv in ipairs(ups) do
-                if type(uv) == "table" and type(uv.jobId) == "string" and uv.pets ~= nil then
-                    return uv
+                if type(uv) == "table" then
+                    -- LIVE-VERIFIED: current BigFroot NESTS the entry under .Server
+                    -- ({Info,Frame,Pet,Server={jobId,pets={{n,r,s,m},...},placeId,age,players,...}}).
+                    -- Older builds had it flat. Unwrap .Server, else use uv directly.
+                    local e = (type(uv.Server) == "table" and uv.Server) or uv
+                    if type(e.jobId) == "string" and type(e.pets) == "table" then
+                        return e
+                    end
                 end
             end
         end
