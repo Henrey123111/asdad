@@ -4,7 +4,7 @@
 
 local WEBHOOK    = "https://discord.com/api/webhooks/1517861705890140170/43D86zsG47dzhMcD1RfWHCNqW9vqNuFMbu46D90L8-0-lXI6nLWWO1TTsa1I7FebFRRp"
 local PLACE_ID   = 97598239454123
-local SNIPE_BASE    = "http://52.64.245.169:8745"
+local SNIPE_BASE    = "https://roblox.yumacheats.com"   -- HTTPS via the cloudflared tunnel (port 443). Raw http://IP:8745 is blocked by many executors/networks even when discord.com works — that's why Discord posted but the coordinator feed didn't.
 local SNIPE_KEY     = "feed-leo-ro-3k9q"
 local SNIPE_BOT_KEY = "ph-leo-9x4m2k7q"   -- bot token for /report
 local SCAN_GAP   = 3
