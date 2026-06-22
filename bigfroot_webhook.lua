@@ -186,6 +186,51 @@ local function getEntry(btn)
     return nil
 end
 
+-- ── ONE-TIME STRUCTURE DUMP → Discord: reveals BigFroot's current row layout so the parser can be fixed ──
+local _dumped = false
+local function dumpRowStructure(row)
+    if _dumped or not row then return end
+    _dumped = true
+    -- 1) every TextLabel / TextButton text anywhere in the row (find where pet/rarity/players text lives)
+    local lbls = {}
+    for _, d in ipairs(row:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            lbls[#lbls+1] = d.ClassName:sub(1,4).."<"..d.Name.."> '"..tostring(d.Text):gsub("[\r\n]"," "):sub(1,34).."'"
+        end
+    end
+    pcall(post, { content = ("🧩 **ROW DUMP** rowClass=%s labels(%d):\n%s"):format(row.ClassName, #lbls, table.concat(lbls, "\n")):sub(1,1900) })
+    -- 2) the join button's connection upvalues (find where jobId / pets live now)
+    local btn = row:FindFirstChildWhichIsA("TextButton")
+    local out = {}
+    if btn then
+        local conns = tryGetConns(btn.MouseButton1Click)
+        out[#out+1] = "btn<"..btn.Name.."> conns="..#conns
+        for ci, conn in ipairs(conns) do
+            local fn; pcall(function() fn = conn.Function end)
+            if not fn then pcall(function() fn = conn.Callback end) end
+            if not fn then pcall(function() fn = rawget(conn,"Function") end) end
+            if type(fn) == "function" then
+                local ups = tryGetUpvalues(fn)
+                for ui, uv in ipairs(ups) do
+                    if type(uv) == "table" then
+                        local keys = {}
+                        for k in pairs(uv) do keys[#keys+1] = tostring(k); if #keys>=14 then break end end
+                        out[#out+1] = ("c%d.u%d table{%s}"):format(ci, ui, table.concat(keys,","))
+                    elseif type(uv) == "string" then
+                        out[#out+1] = ("c%d.u%d str[%d]%s"):format(ci, ui, #uv, (#uv==36 and "=GUID" or ("='"..uv:sub(1,20).."'")))
+                    else
+                        out[#out+1] = ("c%d.u%d %s"):format(ci, ui, type(uv))
+                    end
+                end
+            end
+            if ci >= 2 then break end
+        end
+    else
+        out[#out+1] = "no TextButton in row"
+    end
+    pcall(post, { content = ("🧩 **BTN UPVALUES**:\n%s"):format(table.concat(out, "\n")):sub(1,1900) })
+end
+
 -- ── wait for a row to be populated (up to 0.5s) ──────────────────────────────
 local function waitForChildren(entry)
     -- require 2 populated TextLabels (pet name + players) before considering row ready
@@ -438,11 +483,12 @@ task.spawn(function()
             end
             local servers, n = {}, 0
             local rows, withBtn, parsed, viaFallback = 0, 0, 0, 0   -- DIAGNOSTIC counters
+            local firstRow
             for _, row in ipairs(sf:GetChildren()) do
                 if row:IsA("Frame") then
                     rows += 1
                     local btn = row:FindFirstChildWhichIsA("TextButton")
-                    if btn then withBtn += 1 end
+                    if btn then withBtn += 1; if not firstRow then firstRow = row end end
                     -- Preferred: rich structured entry (every pet). FALLBACK to the SAME method the
                     -- (working) Discord loop uses — getJobId + the row's label text — whenever getEntry's
                     -- strict upvalue shape isn't present. THAT mismatch is why Discord posted but the feed didn't.
@@ -488,6 +534,7 @@ task.spawn(function()
                     or (withBtn == 0) and ("found "..rows.." rows but none had a join button")
                     or ("found "..rows.." rows but couldn't read a job+pet from any (getEntry AND label/jobId fallback both empty)")
                 pcall(post, { content = "🔎 feeder: **nothing to send to coordinator** — "..why..". [rows="..rows..", btn="..withBtn..", parsed="..parsed.."]" })
+                if firstRow then pcall(dumpRowStructure, firstRow) end   -- one-time layout dump → so the parser can be fixed
             end
             if #servers > 0 then
                 -- try the efficient bulk endpoint first
