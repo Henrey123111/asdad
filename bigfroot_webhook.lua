@@ -35,6 +35,8 @@ local RAR_RANK  = { common=1, uncommon=2, rare=3, epic=4, legendary=5, mythic=6,
 local sentServers  = {}   -- jobId -> os.clock() of last post
 local sentFinds    = {}   -- jobId..name -> os.clock()
 local serverSeenAt = {}   -- jobId -> os.clock() when FIRST discovered (used to detect re-posts of old servers)
+local _feedDown      = false   -- coordinator-feed health → drives a throttled Discord alert (Discord is the one channel we can see)
+local _lastFeedAlert = 0
 
 -- ── post webhook with 429 retry ───────────────────────────────────────────────
 local function post(payload)
@@ -420,6 +422,7 @@ end)
 task.spawn(function()
     while not bfReady() do task.wait(1) end
     print("[BF] bulk feeder started -> "..SNIPE_BASE.."/report_bulk")
+    pcall(post, { content = "🛰️ **BigFroot feeder ONLINE** → feeding `"..SNIPE_BASE.."`. (If this device ever can't reach the coordinator you'll get a ⚠️ right here.)" })
     while true do
         pcall(function()
             if not _req then return end
@@ -455,20 +458,35 @@ task.spawn(function()
                     Body = HS:JSONEncode({ bot="bigfroot-feeder", servers=servers }),
                 })
                 local code = ok and res and (res.StatusCode or res.status_code) or 0
+                local fedOK, detail
                 if code >= 200 and code < 300 then
-                    print("[BF] fed "..#servers.." servers (bulk) -> coordinator")
+                    fedOK, detail = true, "bulk"
                 else
                     -- FALLBACK: coordinator doesn't have /report_bulk deployed yet (404/err) → use the
                     -- per-server /report endpoint that already exists, so the feed works WITHOUT deploying.
+                    local sent = 0
                     for _, s in ipairs(servers) do
-                        pcall(_req, {
+                        local rok, rres = pcall(_req, {
                             Url = SNIPE_BASE.."/report", Method="POST",
                             Headers = { ["Content-Type"]="application/json", ["X-PH-Key"]=SNIPE_BOT_KEY },
                             Body = HS:JSONEncode({ bot="bigfroot", job=s.job, place=s.place, players=s.players, bfAge=s.bfAge, pets=s.pets }),
                         })
+                        local rc = rok and rres and (rres.StatusCode or rres.status_code) or 0
+                        if rc >= 200 and rc < 300 then sent += 1 end
                         task.wait(0.05)
                     end
-                    print("[BF] /report_bulk unavailable ("..tostring(code)..") -> fed "..#servers.." via per-server /report")
+                    fedOK = sent > 0
+                    detail = "per-server "..sent.."/"..#servers.." (bulk="..tostring(code)..")"
+                end
+                if fedOK then
+                    print("[BF] fed "..#servers.." servers ("..detail..") -> coordinator")
+                    if _feedDown then pcall(post, { content = "✅ feeder: coordinator feed **restored**." }); _feedDown = false end
+                else
+                    warn("[BF] coordinator feed FAILED ("..detail..") — is "..SNIPE_BASE.." reachable from THIS device?")
+                    if (not _feedDown) or (os.clock() - _lastFeedAlert > 60) then
+                        pcall(post, { content = "⚠️ **feeder can't reach the coordinator** (`"..SNIPE_BASE.."`, "..detail.."). Discord still works, but Live Wild Pets will stay empty until this device can reach the coordinator." })
+                        _feedDown, _lastFeedAlert = true, os.clock()
+                    end
                 end
             end
         end)
