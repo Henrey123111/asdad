@@ -7,7 +7,7 @@ local PLACE_ID   = 97598239454123
 local SNIPE_BASE    = "https://roblox.yumacheats.com"   -- HTTPS via the cloudflared tunnel (port 443). Raw http://IP:8745 is blocked by many executors/networks even when discord.com works — that's why Discord posted but the coordinator feed didn't.
 local SNIPE_KEY     = "feed-leo-ro-3k9q"
 local SNIPE_BOT_KEY = "ph-leo-9x4m2k7q"   -- bot token for /report
-local SCAN_GAP   = 3
+local SCAN_GAP   = 1      -- read BigFroot's list & push to coordinator every 1s (was 3)
 local FINDS_GAP  = 2
 local WH_GAP     = 0.6
 local MIN_RANK   = 4      -- 4=Epic+  5=Legendary+  6=Mythic+
@@ -15,6 +15,9 @@ local MAX_AGE_S  = 30     -- skip servers BigFroot last saw more than this many 
 local DEDUP_TTL  = 300    -- re-allow same server after 5 min (in case it refreshes)
 local FEED_ONLY  = false  -- true = pure feeder: push to the coordinator only, NO Discord posts
 local AUTO_OPEN_FINDER = true   -- auto-open BigFroot's pet-server finder if off + turn ON its auto-refresh (unattended feeder)
+local REOPEN_GAP       = 1      -- how often LOOP 0 checks the panel / keeps it open (was 10)
+local ENABLE_AUTOREFRESH = true -- turn ON BigFroot's native auto-refresh (~2s floor) after each (re)open
+local RESTART_GAP      = 90     -- hard-restart the finder (destroy → reopen) every N s to clear the long-run hang; 0 = never
 
 -- ── HTTP request (all executor naming conventions) ────────────────────────────
 local _req = request or http_request
@@ -293,11 +296,15 @@ end
 local function bfReady() return findBFScrollingFrame() ~= nil end
 
 -- ============================================================
--- LOOP 0: AUTO-OPEN BigFroot's pet-server finder (panel only) — does NOT touch Auto-refresh.
---   The finder is an on-demand panel (Runtime.openServerBrowser()). We ONLY open it when it is
---   CLOSED. We NEVER click the "Auto-refresh" toggle and NEVER destroy/reopen the panel — that is
---   what was resetting your auto-refresh back to OFF. BigFroot already has its own auto-refresh;
---   turn it on once in-game and the script leaves it completely alone.
+-- LOOP 0: AUTO-OPEN + KEEP FRESH BigFroot's pet-server finder.
+--   The finder is an on-demand panel (Runtime.openServerBrowser(), destroyed when closed).
+--   To keep data fresh AND avoid the long-run hang, this loop now:
+--     1. keeps the panel open (checks every REOPEN_GAP = 1s),
+--     2. turns ON BigFroot's native auto-refresh (~2s floor) after every (re)open,
+--     3. every RESTART_GAP seconds DESTROYS + reopens the panel to clear accumulated
+--        state/memory that makes the game hang after running a long time.
+--   The old code deliberately never touched auto-refresh because reopening reset it to OFF —
+--   that's now handled: we re-enable auto-refresh after each restart.
 -- ============================================================
 task.spawn(function()
     if not AUTO_OPEN_FINDER then return end
@@ -321,14 +328,61 @@ task.spawn(function()
         local rg = CG:FindFirstChild("RobloxGui")
         return rg and rg:FindFirstChild("BigFrootServerBrowser") or nil
     end
+    -- find the "Auto-refresh: ON/OFF" toggle inside the panel (text may live on the button or a child label)
+    local function findAutoRefreshBtn(panel)
+        for _, d in ipairs(panel:GetDescendants()) do
+            if d:IsA("TextButton") then
+                local t = tostring(d.Text):lower()
+                if t:find("auto") and t:find("refresh") then return d, t end
+                for _, c in ipairs(d:GetDescendants()) do
+                    if c:IsA("TextLabel") or c:IsA("TextButton") then
+                        local ct = tostring(c.Text):lower()
+                        if ct:find("auto") and ct:find("refresh") then return d, ct end
+                    end
+                end
+            end
+        end
+        return nil, nil
+    end
+    local function enableAutoRefresh()
+        if not ENABLE_AUTOREFRESH then return end
+        local panel = panelNow(); if not panel then return end
+        local btn, t = findAutoRefreshBtn(panel)
+        if btn and t and t:find("off") and typeof(firesignal) == "function" then
+            pcall(firesignal, btn.MouseButton1Click)
+        end
+    end
+    local function openAndArm()
+        local rt = bfRuntime(); if not rt then return end
+        pcall(rt.openServerBrowser)
+        task.wait(0.3)
+        enableAutoRefresh()
+    end
+
     while not bfRuntime() do task.wait(2) end
-    print("[BF] auto-opening pet-server finder (auto-refresh left to BigFroot — script never toggles it)")
+    print("[BF] auto-opening pet-server finder (native auto-refresh ON, restart every "..RESTART_GAP.."s to prevent hang)")
+    local lastRestart = os.clock()
     while true do
         pcall(function()
             local rt = bfRuntime()
-            if rt and not panelNow() then pcall(rt.openServerBrowser) end   -- open ONLY when closed; never touch auto-refresh
+            if not rt then return end
+            -- periodic hard-restart: clears the accumulated state that hangs the game on long runs
+            if RESTART_GAP > 0 and (os.clock() - lastRestart) >= RESTART_GAP then
+                lastRestart = os.clock()
+                local p = panelNow()
+                if p then pcall(function() p:Destroy() end) end
+                task.wait(0.2)
+                openAndArm()
+                return
+            end
+            -- otherwise just keep it open + auto-refresh armed
+            if not panelNow() then
+                openAndArm()
+            else
+                enableAutoRefresh()   -- re-arm in case BigFroot or the user toggled it off
+            end
         end)
-        task.wait(10)
+        task.wait(REOPEN_GAP)
     end
 end)
 
